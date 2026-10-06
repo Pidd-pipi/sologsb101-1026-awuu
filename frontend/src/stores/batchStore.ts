@@ -1,29 +1,26 @@
 /**
  * 入罐批次 store：维护在罐批次、当前选中批次与地块/罐绑定校验。
+ * 在罐量与罐位占用以分罐表（splits）为准，由 db 层事务维护。
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { LocationQuery } from 'vue-router'
 import type { Batch } from '@/types/batch'
 import type { FilterModel } from '@/types/filter'
-import type { BatchRow } from '@/utils/db'
 import {
-  assertTankAssignable,
-  putBatch,
+  assignBatchToTank as assignBatchToTankRow,
+  intakeBatch,
   removeBatch,
   shipBatch as shipBatchRow,
-  updateBatch as updateBatchRow,
-  updateTank,
-  ROW_REVISION
+  updateBatch as updateBatchRow
 } from '@/utils/db'
-import { createId } from '@/utils/uuid'
 import { queryToFilters } from '@/utils/query'
 
 export const BATCH_FILTER_KEYS = ['states', 'parcelIds']
 
 export const useBatchStore = defineStore('batch', () => {
   const filters = ref<FilterModel>({ keyword: '', states: [], parcelIds: [] })
-  /** 当前选中的批次 id（读数页、作业页共用上下文） */
+  /** 当前选中的批次 id（读数页、作业页、倒罐对话框共用上下文） */
   const currentBatchId = ref<string | null>(null)
   const error = ref<string | null>(null)
 
@@ -46,29 +43,26 @@ export const useBatchStore = defineStore('batch', () => {
     currentBatchId.value = id
   }
 
-  /** 入罐登记：先校验罐位可分配，再把罐置为「在用」 */
+  /** 入罐登记：原子事务写批次 + 首条分罐 + 罐位「在用」（容量不够会提示改用倒罐拆分） */
   async function createBatch(payload: Omit<Batch, 'id' | 'lastOperationAt'>): Promise<string> {
     error.value = null
     if (!payload.parcelId) throw new Error('请选择地块')
     if (!payload.tankId) throw new Error('请选择发酵罐')
-    await assertTankAssignable(payload.tankId, null)
-    const now = Date.now()
-    const id = createId('batch')
-    await putBatch({ ...payload, id, lastOperationAt: null, revision: ROW_REVISION, createdAt: now, updatedAt: now })
-    await updateTank(payload.tankId, { state: '在用' })
+    const id = await intakeBatch(payload)
     currentBatchId.value = id
     return id
   }
 
-  /** 改绑罐位：校验新罐可用后再释放旧罐 */
-  async function updateBatch(id: string, patch: Partial<Batch>, current: BatchRow): Promise<void> {
+  /** 通用字段更新（罐位改绑请走 assignToTank / 倒罐，保证分罐与罐位一致） */
+  async function updateBatch(id: string, patch: Partial<Batch>): Promise<void> {
     error.value = null
-    if (patch.tankId && patch.tankId !== current.tankId) {
-      await assertTankAssignable(patch.tankId, id)
-      await updateTank(patch.tankId, { state: '在用' })
-      if (current.tankId) await updateTank(current.tankId, { state: '空闲' })
-    }
     await updateBatchRow(id, patch)
+  }
+
+  /** 整批改绑到另一罐：冲突 / 容量校验、分罐迁移与罐位置位在单事务内完成 */
+  async function assignToTank(tankId: string, batchId: string): Promise<void> {
+    error.value = null
+    await assignBatchToTankRow(tankId, batchId)
   }
 
   async function deleteBatch(id: string): Promise<void> {
@@ -76,7 +70,7 @@ export const useBatchStore = defineStore('batch', () => {
     if (currentBatchId.value === id) currentBatchId.value = null
   }
 
-  /** 出罐：释放罐位并归档批次 */
+  /** 出罐：清空分罐、释放全部占用罐位并归档批次 */
   async function ship(id: string): Promise<void> {
     await shipBatchRow(id)
   }
@@ -91,6 +85,7 @@ export const useBatchStore = defineStore('batch', () => {
     select,
     createBatch,
     updateBatch,
+    assignToTank,
     deleteBatch,
     ship
   }

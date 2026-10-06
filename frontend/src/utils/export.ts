@@ -9,6 +9,7 @@ import type { Reading } from '../types/reading'
 import type { Operation } from '../types/operation'
 import type { Mlf } from '../types/mlf'
 import type { Tasting } from '../types/tasting'
+import type { Split } from '../types/split'
 import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listTastings } from './db'
 import { abvFromSg, gravityDeclinePerDay, isOverTemp, potentialAbv } from './gravity'
 import { nowIso } from './uuid'
@@ -21,6 +22,8 @@ export interface BatchArchive {
   batch: Batch
   parcel: Parcel | null
   tank: Tank | null
+  /** 当前分罐分布（一个批次可拆进多个罐），倒罐后立刻按最新事实导出 */
+  splits: Array<Split & { tankCode: string | null }>
   readings: Reading[]
   operations: Operation[]
   mlf: Mlf | null
@@ -40,6 +43,12 @@ export interface BatchArchive {
     overTempDays: number
     /** 最优品评结论 */
     bestVerdict: string
+    /** 入罐量（采收时登记） */
+    intakeVolumeL: number
+    /** 当前实际在罐量（分罐汇总，L） */
+    inTankVolumeL: number
+    /** 当前占用罐数 */
+    occupiedTankCount: number
   }
 }
 
@@ -47,17 +56,28 @@ export interface BatchArchive {
 export async function buildBatchArchive(batchId: string): Promise<BatchArchive> {
   const batch = await db.batches.get(batchId)
   if (!batch) throw new Error('批次不存在，无法导出档案')
-  const [parcel, tank, allReadings, allOperations, mlf, allTastings] = await Promise.all([
+  const [parcel, tank, allReadings, allOperations, mlf, allTastings, allSplits] = await Promise.all([
     batch.parcelId ? db.parcels.get(batch.parcelId) : Promise.resolve(undefined),
     batch.tankId ? db.tanks.get(batch.tankId) : Promise.resolve(undefined),
     listReadings(),
     listOperations(),
     db.mlfs.where('batchId').equals(batchId).first(),
-    listTastings()
+    listTastings(),
+    db.splits.where('batchId').equals(batchId).toArray()
   ])
   const readings = allReadings.filter((row) => row.batchId === batchId)
   const operations = allOperations.filter((row) => row.batchId === batchId)
   const tastings = allTastings.filter((row) => row.batchId === batchId)
+
+  const tanks = await db.tanks.toArray()
+  const splits = allSplits
+    .filter((row) => row.volumeL > 0)
+    .sort((a, b) => b.volumeL - a.volumeL)
+    .map((row) => ({
+      ...stripRevision(row),
+      tankCode: tanks.find((item) => item.id === row.tankId)?.code ?? null
+    }))
+  const inTankVolumeL = allSplits.reduce((sum, row) => sum + row.volumeL, 0)
 
   let declineSum = 0
   for (let i = 1; i < readings.length; i += 1) {
@@ -80,6 +100,7 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
     batch: stripRevision(batch),
     parcel: parcel ? stripRevision(parcel) : null,
     tank: tank ? stripRevision(tank) : null,
+    splits,
     readings: readings.map(stripRevision),
     operations: operations.map(stripRevision),
     mlf: mlf ? stripRevision(mlf) : null,
@@ -91,7 +112,10 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
       potentialAbv: first ? potentialAbv(first.gravity) : 0,
       estimatedAbv: first && last ? abvFromSg(first.gravity, last.gravity) : 0,
       overTempDays: readings.filter((row) => isOverTemp(row.tempC)).length,
-      bestVerdict
+      bestVerdict,
+      intakeVolumeL: batch.volumeL,
+      inTankVolumeL,
+      occupiedTankCount: splits.length
     }
   }
 }

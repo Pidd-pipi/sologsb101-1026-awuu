@@ -1,14 +1,16 @@
 /**
  * 发酵罐 store：维护罐位占用、容量筛选条件与占用冲突校验。
+ * 占用事实来自分罐表（splits）：一个罐同一时刻至多一个在罐批次。
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { LocationQuery } from 'vue-router'
 import type { Tank, TankState } from '@/types/tank'
 import type { FilterModel } from '@/types/filter'
-import type { BatchRow, TankRow } from '@/utils/db'
+import type { BatchRow, SplitRow, TankRow } from '@/utils/db'
 import { assertTankAssignable, putTank, removeTank, updateTank as updateTankRow, ROW_REVISION } from '@/utils/db'
 import { createId } from '@/utils/uuid'
+import { splitAtTank } from '@/utils/tankOccupancy'
 import { queryToFilters } from '@/utils/query'
 
 export const TANK_FILTER_KEYS = ['materials', 'tempControls', 'states']
@@ -34,9 +36,16 @@ export const useTankStore = defineStore('tank', () => {
     selectedId.value = id
   }
 
+  /** 找出占用该罐的分罐记录（无则返回 null） */
+  function splitOccupying(tankId: string, splits: SplitRow[]): SplitRow | null {
+    return splitAtTank(splits, tankId)
+  }
+
   /** 找出占用该罐的在罐批次（无则返回 null） */
-  function occupancyOf(tankId: string, batches: BatchRow[]): BatchRow | null {
-    return batches.find((batch) => batch.tankId === tankId && batch.state !== '已出罐') ?? null
+  function occupancyOf(tankId: string, splits: SplitRow[], batches: BatchRow[]): BatchRow | null {
+    const split = splitAtTank(splits, tankId)
+    if (!split) return null
+    return batches.find((batch) => batch.id === split.batchId && batch.state !== '已出罐') ?? null
   }
 
   /** 分配前校验：罐位空闲且未被其它在罐批次占用 */
@@ -66,10 +75,10 @@ export const useTankStore = defineStore('tank', () => {
     if (selectedId.value === id) selectedId.value = null
   }
 
-  /** 罐位状态流转（空闲 ⇄ 清洗中）；置为「在用」需由批次绑定触发 */
+  /** 罐位状态流转（空闲 ⇄ 清洗中）；置为「在用」需由批次绑定/倒罐触发 */
   async function changeState(tank: TankRow, next: TankState): Promise<void> {
     if (next === '在用') {
-      throw new Error('罐位「在用」由入罐批次绑定后自动置位，请到入罐登记页分配批次')
+      throw new Error('罐位「在用」由入罐 / 倒罐后自动置位，不能手动设置')
     }
     await updateTankRow(tank.id, { state: next })
   }
@@ -82,6 +91,7 @@ export const useTankStore = defineStore('tank', () => {
     resetFilters,
     applyQuery,
     select,
+    splitOccupying,
     occupancyOf,
     ensureAssignable,
     createTank,

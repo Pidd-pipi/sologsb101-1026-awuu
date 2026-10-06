@@ -8,9 +8,11 @@ import FilterBar from '@/components/common/FilterBar.vue'
 import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, updateBatch, type BatchRow, type ParcelRow, type TankRow } from '@/utils/db'
+import { db, type BatchRow, type ParcelRow, type SplitRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import { useBatchStore } from '@/stores/batchStore'
 import { useTankStore } from '@/stores/tankStore'
+import { splitAtTank } from '@/utils/tankOccupancy'
 import {
   TANK_MATERIALS,
   TANK_STATES,
@@ -26,12 +28,14 @@ import { ROUTES } from '@/router'
 const route = useRoute()
 const router = useRouter()
 const store = useTankStore()
+const batchStore = useBatchStore()
 
 const { rows: tanks, ready } = useIdbTable<TankRow>(() => db.tanks, {
   compare: (a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN')
 })
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
+const { rows: splits } = useIdbTable<SplitRow>(() => db.splits)
 
 const selects: FilterSelectConfig[] = [
   { key: 'materials', label: '材质', options: TANK_MATERIALS.map((item) => ({ label: item, value: item })) },
@@ -39,9 +43,14 @@ const selects: FilterSelectConfig[] = [
   { key: 'states', label: '罐位', options: TANK_STATES.map((item) => ({ label: item, value: item })) }
 ]
 
+/** 占用该罐的在罐分罐（分罐表是占用事实来源） */
+function splitAt(tankId: string): SplitRow | null {
+  return splitAtTank(splits.value, tankId)
+}
+
 /** 占用该罐的在罐批次 */
 function occupancyOf(tankId: string): BatchRow | null {
-  return store.occupancyOf(tankId, batches.value)
+  return store.occupancyOf(tankId, splits.value, batches.value)
 }
 
 function batchLabel(batch: BatchRow | null): string {
@@ -67,15 +76,13 @@ const filtered = computed(() => {
 
 const totals = computed(() => {
   const totalCapacity = tanks.value.reduce((sum, tank) => sum + tank.capacityL, 0)
-  const usedCapacity = tanks.value
-    .filter((tank) => occupancyOf(tank.id) !== null)
-    .reduce((sum, tank) => sum + tank.capacityL, 0)
+  const usedCapacity = tanks.value.reduce((sum, tank) => sum + (splitAt(tank.id)?.volumeL ?? 0), 0)
   return {
     tankCount: tanks.value.length,
     totalCapacity,
     usedCapacity,
     usageRatio: totalCapacity > 0 ? Math.round((usedCapacity / totalCapacity) * 100) : 0,
-    freeCount: tanks.value.filter((tank) => tank.state === '空闲').length
+    freeCount: tanks.value.filter((tank) => splitAt(tank.id) === null).length
   }
 })
 
@@ -148,9 +155,14 @@ async function changeState(tank: TankRow, next: TankState): Promise<void> {
   }
 }
 
-/** 为该罐分配一个在罐批次（真实占用冲突校验） */
+/** 为该罐分配一个在罐批次（事务内做占用冲突与容量校验，并迁移分罐） */
 async function assignBatch(tank: TankRow): Promise<void> {
-  const candidates = batches.value.filter((batch) => batch.state !== '已出罐' && batch.tankId !== tank.id)
+  const candidates = batches.value.filter((batch) => {
+    if (batch.state === '已出罐') return false
+    const occupant = splitAt(tank.id)
+    if (occupant && occupant.batchId !== batch.id) return false
+    return !splits.value.some((split) => split.batchId === batch.id && split.tankId === tank.id && split.volumeL > 0)
+  })
   if (candidates.length === 0) {
     ElMessage.info('暂无待分配的在罐批次')
     return
@@ -166,10 +178,8 @@ async function assignBatch(tank: TankRow): Promise<void> {
       ElMessage.error('批次 id 不存在，请重新选择')
       return
     }
-    await store.ensureAssignable(tank.id, picked.id)
-    await store.updateTank(tank.id, { state: '在用' })
-    await updateBatch(picked.id, { tankId: tank.id })
-    ElMessage.success('罐位已分配')
+    await batchStore.assignToTank(tank.id, picked.id)
+    ElMessage.success('罐位已分配，分罐与在罐量已同步')
   } catch (error) {
     if (error instanceof Error && error.message) ElMessage.warning(error.message)
   }
@@ -197,7 +207,7 @@ watch(
     <div class="page__head">
       <div>
         <h2 class="page__title">发酵罐容量配置与罐位看板</h2>
-        <p class="page__subtitle">罐位「在用」由入罐批次绑定后自动置位；重复分配会被拦截并列出占用批次。</p>
+        <p class="page__subtitle">罐位「在用」由入罐 / 倒罐后按分罐量自动置位；倒罐一提交罐位立即重算，重复分配会被拦截并列出占用批次。</p>
       </div>
       <div>
         <el-button @click="router.push(ROUTES.batches)">去入罐登记</el-button>
@@ -225,7 +235,7 @@ watch(
       <template #header>
         <div class="card-title">
           <span>罐位清单（{{ filtered.length }} / {{ tanks.length }}）</span>
-          <span class="muted">占用冲突校验：同一在罐批次不可占用两个罐位</span>
+          <span class="muted">占用冲突校验：一个罐同一时刻只允许一个在罐批次；一个批次可拆进多个罐</span>
         </div>
       </template>
 
@@ -247,20 +257,23 @@ watch(
             <StageTag :value="row.state" />
           </template>
         </el-table-column>
-        <el-table-column label="占用批次" min-width="200">
+        <el-table-column label="占用批次 / 在罐量" min-width="220">
           <template #default="{ row }">
-            <span v-if="occupancyOf(row.id)">{{ batchLabel(occupancyOf(row.id)) }}</span>
-            <span v-else class="muted">未占用</span>
+            <template v-if="splitAt(row.id)">
+              <div>{{ batchLabel(occupancyOf(row.id)) }}</div>
+              <div class="muted">实际在罐 {{ splitAt(row.id)?.volumeL }}L / 容量 {{ row.capacityL }}L</div>
+            </template>
+            <span v-else class="muted">未占用（容量 {{ row.capacityL }}L）</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="320" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="row.state === '在用'" @click="assignBatch(row)">分配批次</el-button>
+            <el-button link type="primary" :disabled="splitAt(row.id) !== null" @click="assignBatch(row)">分配批次</el-button>
             <el-button
               v-if="row.state !== '清洗中'"
               link
               type="warning"
-              :disabled="occupancyOf(row.id) !== null"
+              :disabled="splitAt(row.id) !== null"
               @click="changeState(row, '清洗中')"
             >
               转清洗

@@ -42,7 +42,7 @@ docker compose up -d --build      # 代码改动后重新构建
 | 语言 | TypeScript（`strict: true`，无 `any`） | `npm run build` 内含 `vue-tsc --noEmit` 类型检查 |
 | UI 组件库 | Element Plus 2.x（含 `@element-plus/icons-vue`） | 表格、卡片、对话框、表单、进度条、时间线交互 |
 | 构建工具 | Vite 6 | 开发服务器端口 22826 |
-| 状态管理 | Pinia（setup store） | `parcelStore` / `tankStore` / `batchStore` / `operationStore` / `mlfStore` |
+| 状态管理 | Pinia（setup store） | `parcelStore` / `tankStore` / `batchStore` / `operationStore` / `rackingStore` / `mlfStore` |
 | 路由 | Vue Router 4（history 模式） | nginx 侧配合 `try_files` 做 SPA fallback |
 | 本地存储 | Dexie 4（IndexedDB 封装） | 库名 `gbwinetank-db`，含结构版本号与 upgrade 迁移 |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段执行类型检查与打包，运行阶段仅托管静态产物 |
@@ -68,7 +68,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22826）
 | `/parcels` | 地块与品种台账 | Parcel、Batch | 新建/编辑/删除地块、按品种与朝向筛选、回显在罐批次数与累计入罐量、筛选同步 URL query |
 | `/tanks` | 发酵罐容量配置与罐位看板 | Tank、Batch | 按材质/温控/罐位筛选、罐位占用冲突校验、清洗状态流转 |
 | `/batches` | 入罐登记与发酵读数 | Batch、Reading、Parcel、Tank | 绑定地块与罐入罐、逐日录比重/温度/糖度、趋势条、超温标记、出罐释放罐位 |
-| `/operations` | 倒罐与压帽作业编排 | Operation、Batch | 按日期排班、拖拽调序（含上下移按钮）、指派操作人、完成回写批次最近作业时间 |
+| `/operations` | 倒罐与压帽作业编排 | Operation、Batch、Split | 按日期排班、拖拽调序（含上下移按钮）、指派操作人、倒罐按罐容拆进多罐（作业/分罐/罐位单事务提交，并发抢占被拦截）、完成回写批次最近作业时间 |
 | `/mlf` | 苹果酸乳酸发酵跟踪 | Mlf、Batch、Reading | 启动苹乳、逐次录入苹果酸、低于阈值自动判定结束并联动批次状态 |
 | `/tasting` | 品评调配与批次档案 | Tasting 及全部模型 | 同批次多次品评并列对比、批次档案 JSON 导出、本地库版本查看与整库导入导出 |
 
@@ -104,8 +104,9 @@ sologsb101-1026/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），当前结构版本号 `version(2)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳；v1 → v2 自动按历史在罐批次的罐与入罐量回填分罐）。
+- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配、`splits` 分罐（一个批次在某罐当前的在罐量，是罐位占用与在罐量的唯一事实），共 8 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **倒罐即分罐**：倒罐按目标罐容量依次灌满，一个批次可拆进多个罐，目标罐容量不够则分批倒、余下留在原罐；作业 / 分罐 / 罐位在同一个 IndexedDB 事务内提交，任一写入失败整批回滚。两个人各开页面同时提交同一批次（或抢同一目标罐）时，后到的一次在事务内看到罐位已被占用会停下并提示刷新，不会产生半截记录；提交后罐位占用、在罐量与批次档案导出立即重算。
 - **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `parcels` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评），保证每个页面首次打开都有内容；播种幂等，清空后重进会重新播种。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
 - **数据迁移**：在「品评与批次档案」页可导出整库 JSON 备份，或导出单批次档案；在其它设备用「导入备份」还原。

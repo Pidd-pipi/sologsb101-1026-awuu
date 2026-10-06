@@ -8,13 +8,15 @@ import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
-import { db, type BatchRow, type ParcelRow, type ReadingRow, type TankRow } from '@/utils/db'
+import { db, type BatchRow, type ParcelRow, type ReadingRow, type SplitRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useFermentTrend } from '@/hooks/useFermentTrend'
 import { useBatchStore } from '@/stores/batchStore'
+import RackWineDialog from '@/components/RackWineDialog.vue'
 import { BATCH_STATES, createEmptyBatch, type Batch } from '@/types/batch'
 import { OVER_TEMP_C, createEmptyReading, type Reading } from '@/types/reading'
 import type { FilterSelectConfig, FilterModel } from '@/types/filter'
+import { activeVolumesByBatch, splitsOfBatch } from '@/utils/tankOccupancy'
 import { filtersToQuery } from '@/utils/query'
 
 const route = useRoute()
@@ -29,6 +31,7 @@ const { rows: readings } = useIdbTable<ReadingRow>(() => db.readings, {
 })
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
 const { rows: tanks } = useIdbTable<TankRow>(() => db.tanks)
+const { rows: splits } = useIdbTable<SplitRow>(() => db.splits)
 
 const selects = computed<FilterSelectConfig[]>(() => [
   { key: 'states', label: '批次状态', options: BATCH_STATES.map((item) => ({ label: item, value: item })) },
@@ -61,12 +64,15 @@ const batchReadings = computed<ReadingRow[]>(() =>
 
 const trend = useFermentTrend(batchReadings)
 
+/** 在罐量以分罐表汇总为准：倒罐拆进多罐后立刻重算 */
+const volumeByBatch = computed(() => activeVolumesByBatch(splits.value))
+
 const batchTotals = computed(() => {
   const active = batches.value.filter((batch) => batch.state !== '已出罐')
   return {
     batchCount: batches.value.length,
     activeCount: active.length,
-    activeVolume: active.reduce((sum, batch) => sum + batch.volumeL, 0),
+    activeVolume: active.reduce((sum, batch) => sum + (volumeByBatch.value.get(batch.id) ?? 0), 0),
     avgBrix:
       active.length > 0 ? Number((active.reduce((sum, batch) => sum + batch.brix, 0) / active.length).toFixed(1)) : 0,
     readingCount: readings.value.length
@@ -75,6 +81,20 @@ const batchTotals = computed(() => {
 
 function parcelName(parcelId: string): string {
   return parcels.value.find((item) => item.id === parcelId)?.name ?? '未绑定地块'
+}
+
+/** 批次当前在罐分罐（可能横跨多个罐） */
+function batchSplits(batchId: string): SplitRow[] {
+  return splitsOfBatch(splits.value, batchId)
+    .filter((split) => split.volumeL > 0)
+    .sort((a, b) => b.volumeL - a.volumeL)
+}
+
+/** 批次分罐描述，如 F-01 1800L + F-03 800L */
+function batchTanksText(batch: BatchRow): string {
+  const list = batchSplits(batch.id)
+  if (list.length === 0) return batch.tankId ? `${tankCode(batch.tankId)}（0L）` : '已释放'
+  return list.map((split) => `${tankCode(split.tankId)} ${split.volumeL}L`).join(' + ')
 }
 
 function tankCode(tankId: string): string {
@@ -100,12 +120,12 @@ const batchRules: FormRules = {
   volumeL: [{ required: true, message: '请填写入罐量', trigger: 'blur' }]
 }
 
-/** 可选罐位：状态非「清洗中」，且未被其它在罐批次占用 */
+/** 可选罐位：状态非「清洗中」，且未被其它在罐批次占用（占用以分罐为准） */
 const assignableTanks = computed(() =>
   tanks.value.filter((tank) => {
     if (tank.state === '清洗中') return false
-    const occupied = batches.value.some(
-      (batch) => batch.tankId === tank.id && batch.state !== '已出罐' && batch.id !== store.currentBatchId
+    const occupied = splits.value.some(
+      (split) => split.tankId === tank.id && split.volumeL > 0
     )
     return !occupied
   })
@@ -154,6 +174,14 @@ async function removeBatch(batch: BatchRow): Promise<void> {
   }
   await store.deleteBatch(batch.id)
   ElMessage.success('批次及其下级记录已删除')
+}
+
+/* ------------------------------ 倒罐 ------------------------------ */
+const rackDialogVisible = ref(false)
+
+function openRack(batch?: BatchRow): void {
+  if (batch) store.select(batch.id)
+  rackDialogVisible.value = true
 }
 
 /* ------------------------------ 读数录入 ------------------------------ */
@@ -241,7 +269,10 @@ watch(currentBatch, (batch) => {
           逐日记录比重 / 温度 / 糖度，派生下降速率并标记超温日（阈值 {{ OVER_TEMP_C }} ℃）。
         </p>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreateBatch">新建入罐批次</el-button>
+      <div>
+        <el-button type="success" plain @click="openRack()">倒罐分罐</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreateBatch">新建入罐批次</el-button>
+      </div>
     </div>
 
     <div class="badge-row">
@@ -289,9 +320,22 @@ watch(currentBatch, (batch) => {
                 <StageTag :value="batch.state" size="small" />
               </div>
               <div class="batch-item__meta">
-                {{ batch.harvestDate }} · {{ batch.volumeL }}L · {{ batch.brix }}°Bx · 罐 {{ tankCode(batch.tankId) }}
+                {{ batch.harvestDate }} · 入罐量 {{ batch.volumeL }}L · {{ batch.brix }}°Bx
+              </div>
+              <div class="batch-item__tanks">
+                在罐：{{ batchTanksText(batch) }}
+                <span class="muted">（当前在罐量 {{ volumeByBatch.get(batch.id) ?? 0 }}L）</span>
               </div>
               <div class="batch-item__actions">
+                <el-button
+                  v-if="batch.state !== '已出罐'"
+                  link
+                  type="success"
+                  size="small"
+                  @click.stop="openRack(batch)"
+                >
+                  倒罐
+                </el-button>
                 <el-button link type="primary" size="small" @click.stop="shipBatch(batch)">出罐</el-button>
                 <el-button link type="danger" size="small" @click.stop="removeBatch(batch)">删除</el-button>
               </div>
@@ -435,6 +479,14 @@ watch(currentBatch, (batch) => {
         <el-button type="primary" @click="submitReading">保存读数</el-button>
       </template>
     </el-dialog>
+
+    <RackWineDialog
+      v-model="rackDialogVisible"
+      :batches="batches"
+      :tanks="tanks"
+      :splits="splits"
+      :default-batch-id="store.currentBatchId"
+    />
   </div>
 </template>
 
@@ -495,6 +547,13 @@ watch(currentBatch, (batch) => {
   margin-top: 4px;
   font-size: 12px;
   color: #8c8479;
+}
+
+.batch-item__tanks {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #8a3b56;
+  font-variant-numeric: tabular-nums;
 }
 
 .batch-item__actions {

@@ -3,8 +3,18 @@
  * 只在 parcels 表为空时执行，地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评 三层互相引用，
  * 保证 6 个页面第一次进入都有可点通的内容。函数本身幂等：由调用方判定表是否为空。
  */
-import type { ParcelRow, TankRow, BatchRow, ReadingRow, OperationRow, MlfRow, TastingRow } from './db'
+import type {
+  ParcelRow,
+  TankRow,
+  BatchRow,
+  ReadingRow,
+  OperationRow,
+  MlfRow,
+  TastingRow,
+  SplitRow
+} from './db'
 import { db, ROW_REVISION } from './db'
+import { splitId } from '../types/split'
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
   return { ...row, revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() }
@@ -19,7 +29,7 @@ const PARCELS: Array<Omit<ParcelRow, 'revision' | 'createdAt' | 'updatedAt'>> = 
 const TANKS: Array<Omit<TankRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
   { id: 'tk-001', code: 'F-01', material: '不锈钢', capacityL: 3000, tempControl: '夹套', state: '在用' },
   { id: 'tk-002', code: 'F-02', material: '橡木', capacityL: 2250, tempControl: '无', state: '在用' },
-  { id: 'tk-003', code: 'F-03', material: '不锈钢', capacityL: 1500, tempControl: '盘管', state: '空闲' },
+  { id: 'tk-003', code: 'F-03', material: '不锈钢', capacityL: 1500, tempControl: '盘管', state: '在用' },
   { id: 'tk-004', code: 'F-04', material: '混凝土', capacityL: 5000, tempControl: '夹套', state: '清洗中' }
 ]
 
@@ -56,6 +66,34 @@ const BATCHES: Array<Omit<BatchRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
   }
 ]
 
+// 分罐：在罐批次当前在各罐的实际酒量（一个批次可拆进多罐）
+const SPLITS: Array<Omit<SplitRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
+  {
+    id: splitId('b-001', 'tk-001'),
+    batchId: 'b-001',
+    tankId: 'tk-001',
+    volumeL: 1800,
+    lastOperationId: 'op-003',
+    rackedAt: '2024-09-18T09:20:00.000Z'
+  },
+  {
+    id: splitId('b-001', 'tk-003'),
+    batchId: 'b-001',
+    tankId: 'tk-003',
+    volumeL: 800,
+    lastOperationId: 'op-003',
+    rackedAt: '2024-09-18T09:20:00.000Z'
+  },
+  {
+    id: splitId('b-002', 'tk-002'),
+    batchId: 'b-002',
+    tankId: 'tk-002',
+    volumeL: 2000,
+    lastOperationId: null,
+    rackedAt: null
+  }
+]
+
 const READINGS: Array<Omit<ReadingRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
   { id: 'r-001', batchId: 'b-001', date: '2024-09-12', gravity: 1.102, tempC: 24.5, brix: 24.5 },
   { id: 'r-002', batchId: 'b-001', date: '2024-09-14', gravity: 1.078, tempC: 27.2, brix: 19.4 },
@@ -73,7 +111,21 @@ const READINGS: Array<Omit<ReadingRow, 'revision' | 'createdAt' | 'updatedAt'>> 
 const OPERATIONS: Array<Omit<OperationRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
   { id: 'op-001', batchId: 'b-001', type: '压帽', date: '2024-09-13', durationMin: 30, operator: '陈岩', state: '已完成', seq: 1 },
   { id: 'op-002', batchId: 'b-001', type: '淋皮', date: '2024-09-14', durationMin: 25, operator: '陈岩', state: '已完成', seq: 2 },
-  { id: 'op-003', batchId: 'b-001', type: '倒罐', date: '2024-09-18', durationMin: 55, operator: '林沐', state: '已完成', seq: 3 },
+  {
+    id: 'op-003',
+    batchId: 'b-001',
+    type: '倒罐',
+    date: '2024-09-18',
+    durationMin: 55,
+    operator: '林沐',
+    state: '已完成',
+    seq: 3,
+    rackDetail: {
+      sourceTankId: 'tk-001',
+      targets: [{ tankId: 'tk-003', moveVolumeL: 800 }],
+      leftVolumeL: 1800
+    }
+  },
   { id: 'op-004', batchId: 'b-001', type: '倒罐', date: '2024-09-26', durationMin: 50, operator: '林沐', state: '计划', seq: 4 },
   { id: 'op-005', batchId: 'b-002', type: '压帽', date: '2024-09-16', durationMin: 30, operator: '周亦', state: '已完成', seq: 1 },
   { id: 'op-006', batchId: 'b-002', type: '倒罐', date: '2024-09-21', durationMin: 60, operator: '周亦', state: '已完成', seq: 2 },
@@ -117,15 +169,16 @@ const TASTINGS: Array<Omit<TastingRow, 'revision' | 'createdAt' | 'updatedAt'>> 
   }
 ]
 
-/** 灌入演示数据（地块 → 罐 → 批次 → 读数/作业/苹乳/品评） */
+/** 灌入演示数据（地块 → 罐 → 批次 → 分罐 → 读数/作业/苹乳/品评） */
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.parcels, db.tanks, db.batches, db.readings, db.operations, db.mlfs, db.tastings],
+    [db.parcels, db.tanks, db.batches, db.splits, db.readings, db.operations, db.mlfs, db.tastings],
     async () => {
       await db.parcels.bulkPut(PARCELS.map(rev))
       await db.tanks.bulkPut(TANKS.map(rev))
       await db.batches.bulkPut(BATCHES.map(rev))
+      await db.splits.bulkPut(SPLITS.map(rev))
       await db.readings.bulkPut(READINGS.map(rev))
       await db.operations.bulkPut(OPERATIONS.map(rev))
       await db.mlfs.bulkPut(MLFS.map(rev))

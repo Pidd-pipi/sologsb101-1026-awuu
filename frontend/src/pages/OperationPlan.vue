@@ -7,7 +7,8 @@ import { Plus, Rank } from '@element-plus/icons-vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import StageTag from '@/components/common/StageTag.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, type BatchRow, type OperationRow, type ParcelRow } from '@/utils/db'
+import RackWineDialog from '@/components/RackWineDialog.vue'
+import { db, type BatchRow, type OperationRow, type ParcelRow, type SplitRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useOperationStore } from '@/stores/operationStore'
 import { OPERATION_STATES, OPERATION_TYPES, createEmptyOperation, type Operation } from '@/types/operation'
@@ -23,6 +24,29 @@ const { rows: operations, ready } = useIdbTable<OperationRow>(() => db.operation
 })
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
+const { rows: tanks } = useIdbTable<TankRow>(() => db.tanks)
+const { rows: splits } = useIdbTable<SplitRow>(() => db.splits)
+
+/* ------------------------------ 倒罐 ------------------------------ */
+const rackDialogVisible = ref(false)
+
+function openRack(): void {
+  rackDialogVisible.value = true
+}
+
+function tankCode(tankId: string): string {
+  if (!tankId) return '—'
+  return tanks.value.find((item) => item.id === tankId)?.code ?? '未知罐'
+}
+
+/** 倒罐作业的分罐去向描述（来自执行时快照） */
+function rackTrace(row: OperationRow): string {
+  if (row.type !== '倒罐' || !row.rackDetail) return ''
+  const targets = row.rackDetail.targets
+    .map((target) => `${tankCode(target.tankId)} ${target.moveVolumeL}L`)
+    .join('、')
+  return `${tankCode(row.rackDetail.sourceTankId)} → ${targets}；原罐余量 ${row.rackDetail.leftVolumeL}L`
+}
 
 const selects: FilterSelectConfig[] = [
   { key: 'types', label: '作业类型', options: OPERATION_TYPES.map((item) => ({ label: item, value: item })) },
@@ -174,7 +198,10 @@ watch(
         <h2 class="page__title">倒罐与压帽作业编排</h2>
         <p class="page__subtitle">按日期排班并拖拽调整先后顺序；标记完成后自动回写批次的最近作业时间。</p>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新增作业</el-button>
+      <div>
+        <el-button type="success" plain @click="openRack">倒罐分罐</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">新增作业</el-button>
+      </div>
     </div>
 
     <el-card shadow="never">
@@ -228,6 +255,7 @@ watch(
           <div class="op-item__meta">
             {{ row.date }} · 操作人 {{ row.operator }} · {{ batchLabel(row.batchId) }}
           </div>
+          <div v-if="rackTrace(row)" class="op-item__rack">🍷 实际分罐：{{ rackTrace(row) }}</div>
         </div>
         <div class="op-item__actions">
           <el-button link size="small" :disabled="index === 0" @click="moveBy(index, -1)">上移</el-button>
@@ -276,6 +304,14 @@ watch(
         <el-button type="primary" @click="submit">保存</el-button>
       </template>
     </el-dialog>
+
+    <RackWineDialog
+      v-model="rackDialogVisible"
+      :batches="batches"
+      :tanks="tanks"
+      :splits="splits"
+      :default-batch-id="store.currentBatchId"
+    />
   </div>
 </template>
 
@@ -342,6 +378,12 @@ watch(
   margin-top: 4px;
   font-size: 12px;
   color: #8c8479;
+}
+
+.op-item__rack {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8a3b56;
 }
 
 .op-item__actions {
