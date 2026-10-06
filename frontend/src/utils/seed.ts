@@ -3,8 +3,17 @@
  * 只在 parcels 表为空时执行，地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评 三层互相引用，
  * 保证 6 个页面第一次进入都有可点通的内容。函数本身幂等：由调用方判定表是否为空。
  */
-import type { ParcelRow, TankRow, BatchRow, ReadingRow, OperationRow, MlfRow, TastingRow } from './db'
-import { db, ROW_REVISION } from './db'
+import type {
+  ParcelRow,
+  TankRow,
+  BatchRow,
+  ReadingRow,
+  OperationRow,
+  MlfRow,
+  TastingRow,
+  TankAllocationRow
+} from './db'
+import { db, RACK_VERSION_KEY, ROW_REVISION } from './db'
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
   return { ...row, revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() }
@@ -20,7 +29,8 @@ const TANKS: Array<Omit<TankRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
   { id: 'tk-001', code: 'F-01', material: '不锈钢', capacityL: 3000, tempControl: '夹套', state: '在用' },
   { id: 'tk-002', code: 'F-02', material: '橡木', capacityL: 2250, tempControl: '无', state: '在用' },
   { id: 'tk-003', code: 'F-03', material: '不锈钢', capacityL: 1500, tempControl: '盘管', state: '空闲' },
-  { id: 'tk-004', code: 'F-04', material: '混凝土', capacityL: 5000, tempControl: '夹套', state: '清洗中' }
+  { id: 'tk-004', code: 'F-04', material: '混凝土', capacityL: 5000, tempControl: '夹套', state: '清洗中' },
+  { id: 'tk-005', code: 'F-05', material: '不锈钢', capacityL: 1000, tempControl: '夹套', state: '空闲' }
 ]
 
 const BATCHES: Array<Omit<BatchRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -54,6 +64,12 @@ const BATCHES: Array<Omit<BatchRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
     state: '已出罐',
     lastOperationAt: '2024-10-08T08:40:00.000Z'
   }
+]
+
+/** 初始分罐占用：在罐批次整批落在入罐时绑定的罐里（倒罐后才会出现一批多罐） */
+const ALLOCATIONS: Array<Omit<TankAllocationRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
+  { id: 'alloc-b-001', batchId: 'b-001', tankId: 'tk-001', volumeL: 2600 },
+  { id: 'alloc-b-002', batchId: 'b-002', tankId: 'tk-002', volumeL: 2000 }
 ]
 
 const READINGS: Array<Omit<ReadingRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -117,19 +133,32 @@ const TASTINGS: Array<Omit<TastingRow, 'revision' | 'createdAt' | 'updatedAt'>> 
   }
 ]
 
-/** 灌入演示数据（地块 → 罐 → 批次 → 读数/作业/苹乳/品评） */
+/** 灌入演示数据（地块 → 罐 → 批次 → 读数/作业/苹乳/品评/分罐） */
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.parcels, db.tanks, db.batches, db.readings, db.operations, db.mlfs, db.tastings],
+    [
+      db.parcels,
+      db.tanks,
+      db.batches,
+      db.readings,
+      db.operations,
+      db.mlfs,
+      db.tastings,
+      db.tankAllocations,
+      db.rackings,
+      db.meta
+    ],
     async () => {
       await db.parcels.bulkPut(PARCELS.map(rev))
       await db.tanks.bulkPut(TANKS.map(rev))
       await db.batches.bulkPut(BATCHES.map(rev))
+      await db.tankAllocations.bulkPut(ALLOCATIONS.map(rev))
       await db.readings.bulkPut(READINGS.map(rev))
       await db.operations.bulkPut(OPERATIONS.map(rev))
       await db.mlfs.bulkPut(MLFS.map(rev))
       await db.tastings.bulkPut(TASTINGS.map(rev))
+      await db.meta.put({ key: RACK_VERSION_KEY, value: 0 })
     }
   )
 }

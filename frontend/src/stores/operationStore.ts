@@ -12,8 +12,11 @@ import {
   putOperation,
   removeOperation,
   reorderOperations,
+  submitRacking as submitRackingRow,
   updateOperation as updateOperationRow,
-  ROW_REVISION
+  ROW_REVISION,
+  type RackingInput,
+  type RackingResult
 } from '@/utils/db'
 import { createId } from '@/utils/uuid'
 import { queryToFilters } from '@/utils/query'
@@ -75,6 +78,14 @@ export const useOperationStore = defineStore('operation', () => {
     await reorderOperations(next.map((item) => item.id))
   }
 
+  /**
+   * 提交倒罐：按目标罐容量搬酒（可拆多罐、容量不足分批、余量留原罐）。
+   * 作业 / 分罐 / 罐位 / 倒罐流水在同一事务写入，失败整批回滚。
+   */
+  async function racking(input: RackingInput): Promise<RackingResult> {
+    return submitRackingRow(input)
+  }
+
   return {
     filters,
     currentBatchId,
@@ -86,6 +97,7 @@ export const useOperationStore = defineStore('operation', () => {
     updateOperation,
     deleteOperation,
     finish,
-    move
+    move,
+    racking
   }
 })

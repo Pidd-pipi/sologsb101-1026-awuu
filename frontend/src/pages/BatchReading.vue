@@ -8,7 +8,7 @@ import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
-import { db, type BatchRow, type ParcelRow, type ReadingRow, type TankRow } from '@/utils/db'
+import { db, type BatchRow, type ParcelRow, type ReadingRow, type TankAllocationRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useFermentTrend } from '@/hooks/useFermentTrend'
 import { useBatchStore } from '@/stores/batchStore'
@@ -29,6 +29,7 @@ const { rows: readings } = useIdbTable<ReadingRow>(() => db.readings, {
 })
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
 const { rows: tanks } = useIdbTable<TankRow>(() => db.tanks)
+const { rows: allocations } = useIdbTable<TankAllocationRow>(() => db.tankAllocations)
 
 const selects = computed<FilterSelectConfig[]>(() => [
   { key: 'states', label: '批次状态', options: BATCH_STATES.map((item) => ({ label: item, value: item })) },
@@ -63,10 +64,15 @@ const trend = useFermentTrend(batchReadings)
 
 const batchTotals = computed(() => {
   const active = batches.value.filter((batch) => batch.state !== '已出罐')
+  // 在罐量以分罐表为准（倒罐拆罐后仍等于各罐分酒量之和）
+  const activeIds = new Set(active.map((batch) => batch.id))
+  const activeVolume = allocations.value
+    .filter((alloc) => activeIds.has(alloc.batchId))
+    .reduce((sum, alloc) => sum + alloc.volumeL, 0)
   return {
     batchCount: batches.value.length,
     activeCount: active.length,
-    activeVolume: active.reduce((sum, batch) => sum + batch.volumeL, 0),
+    activeVolume,
     avgBrix:
       active.length > 0 ? Number((active.reduce((sum, batch) => sum + batch.brix, 0) / active.length).toFixed(1)) : 0,
     readingCount: readings.value.length
@@ -77,9 +83,18 @@ function parcelName(parcelId: string): string {
   return parcels.value.find((item) => item.id === parcelId)?.name ?? '未绑定地块'
 }
 
-function tankCode(tankId: string): string {
-  if (!tankId) return '已释放'
-  return tanks.value.find((item) => item.id === tankId)?.code ?? '未知罐'
+/** 某批次当前占有的分罐（倒罐后可能多个） */
+function batchTankList(batch: BatchRow): TankAllocationRow[] {
+  return allocations.value.filter((alloc) => alloc.batchId === batch.id)
+}
+
+function tankText(batch: BatchRow): string {
+  if (batch.state === '已出罐') return '已出罐'
+  const list = batchTankList(batch)
+  if (list.length === 0) return '未占罐'
+  return list
+    .map((alloc) => tanks.value.find((item) => item.id === alloc.tankId)?.code ?? '未知罐')
+    .join('、')
 }
 
 /** 趋势条高度百分比（比重越大条越高） */
@@ -100,14 +115,12 @@ const batchRules: FormRules = {
   volumeL: [{ required: true, message: '请填写入罐量', trigger: 'blur' }]
 }
 
-/** 可选罐位：状态非「清洗中」，且未被其它在罐批次占用 */
+/** 可选罐位：非清洗中，且分罐表里没有其它在罐批次占酒（以分罐记录为准） */
 const assignableTanks = computed(() =>
   tanks.value.filter((tank) => {
     if (tank.state === '清洗中') return false
-    const occupied = batches.value.some(
-      (batch) => batch.tankId === tank.id && batch.state !== '已出罐' && batch.id !== store.currentBatchId
-    )
-    return !occupied
+    const occupiedByOther = allocations.value.some((alloc) => alloc.tankId === tank.id)
+    return !occupiedByOther
   })
 )
 
@@ -289,7 +302,7 @@ watch(currentBatch, (batch) => {
                 <StageTag :value="batch.state" size="small" />
               </div>
               <div class="batch-item__meta">
-                {{ batch.harvestDate }} · {{ batch.volumeL }}L · {{ batch.brix }}°Bx · 罐 {{ tankCode(batch.tankId) }}
+                {{ batch.harvestDate }} · {{ batch.volumeL }}L · {{ batch.brix }}°Bx · 罐 {{ tankText(batch) }}
               </div>
               <div class="batch-item__actions">
                 <el-button link type="primary" size="small" @click.stop="shipBatch(batch)">出罐</el-button>

@@ -7,7 +7,7 @@ import { Plus } from '@element-plus/icons-vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, type BatchRow, type ParcelRow } from '@/utils/db'
+import { db, type BatchRow, type ParcelRow, type TankAllocationRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useParcelStore } from '@/stores/parcelStore'
 import { PARCEL_ASPECTS, PARCEL_VARIETIES, createEmptyParcel, type Parcel } from '@/types/parcel'
@@ -23,18 +23,23 @@ const { rows: parcels, ready } = useIdbTable<ParcelRow>(() => db.parcels, {
   compare: (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN')
 })
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
+const { rows: allocations } = useIdbTable<TankAllocationRow>(() => db.tankAllocations)
 
 const selects: FilterSelectConfig[] = [
   { key: 'varieties', label: '品种', options: PARCEL_VARIETIES.map((item) => ({ label: item, value: item })) },
   { key: 'aspects', label: '朝向', options: PARCEL_ASPECTS.map((item) => ({ label: item, value: item })) }
 ]
 
-/** 单个地块的在罐批次数与累计入罐量 */
+/** 单个地块的在罐批次数与累计在罐量（按分罐记录，倒罐拆罐后也对得上） */
 function statsOf(parcelId: string): { activeCount: number; totalVolumeL: number } {
   const related = batches.value.filter((batch) => batch.parcelId === parcelId)
+  const active = related.filter((batch) => batch.state !== '已出罐')
+  const activeIds = new Set(active.map((batch) => batch.id))
   return {
-    activeCount: related.filter((batch) => batch.state !== '已出罐').length,
-    totalVolumeL: related.reduce((sum, batch) => sum + batch.volumeL, 0)
+    activeCount: active.length,
+    totalVolumeL: allocations.value
+      .filter((alloc) => activeIds.has(alloc.batchId))
+      .reduce((sum, alloc) => sum + alloc.volumeL, 0)
   }
 }
 
@@ -52,10 +57,13 @@ const filtered = computed(() => {
 
 const totals = computed(() => {
   const activeBatches = batches.value.filter((batch) => batch.state !== '已出罐')
+  const activeIds = new Set(activeBatches.map((batch) => batch.id))
   return {
     parcelCount: parcels.value.length,
     activeBatchCount: activeBatches.length,
-    totalVolumeL: batches.value.reduce((sum, batch) => sum + batch.volumeL, 0),
+    totalVolumeL: allocations.value
+      .filter((alloc) => activeIds.has(alloc.batchId))
+      .reduce((sum, alloc) => sum + alloc.volumeL, 0),
     avgBrix:
       batches.value.length > 0
         ? Number((batches.value.reduce((sum, batch) => sum + batch.brix, 0) / batches.value.length).toFixed(1))

@@ -9,7 +9,18 @@ import type { Reading } from '../types/reading'
 import type { Operation } from '../types/operation'
 import type { Mlf } from '../types/mlf'
 import type { Tasting } from '../types/tasting'
-import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listTastings } from './db'
+import type { TankAllocation } from '../types/allocation'
+import type { Racking } from '../types/racking'
+import {
+  db,
+  DB_NAME,
+  DB_SCHEMA_VERSION,
+  listAllocations,
+  listOperations,
+  listRackings,
+  listReadings,
+  listTastings
+} from './db'
 import { abvFromSg, gravityDeclinePerDay, isOverTemp, potentialAbv } from './gravity'
 import { nowIso } from './uuid'
 
@@ -20,7 +31,14 @@ export interface BatchArchive {
   exportedAt: string
   batch: Batch
   parcel: Parcel | null
+  /** 批次主罐（兼容旧档案字段；拆罐后请以 tankAllocations 为准） */
   tank: Tank | null
+  /** 当前分罐占用：倒罐后一个批次可分散在多个罐 */
+  tankAllocations: Array<TankAllocation & { tankCode: string | null }>
+  /** 当前在罐量（各分罐酒量之和，L） */
+  totalInTankL: number
+  /** 倒罐流水：每次搬酒的分罐与余量记录 */
+  rackings: Racking[]
   readings: Reading[]
   operations: Operation[]
   mlf: Mlf | null
@@ -47,17 +65,41 @@ export interface BatchArchive {
 export async function buildBatchArchive(batchId: string): Promise<BatchArchive> {
   const batch = await db.batches.get(batchId)
   if (!batch) throw new Error('批次不存在，无法导出档案')
-  const [parcel, tank, allReadings, allOperations, mlf, allTastings] = await Promise.all([
+  const [
+    parcel,
+    tank,
+    allReadings,
+    allOperations,
+    mlf,
+    allTastings,
+    allAllocations,
+    allRackings,
+    tanks
+  ] = await Promise.all([
     batch.parcelId ? db.parcels.get(batch.parcelId) : Promise.resolve(undefined),
     batch.tankId ? db.tanks.get(batch.tankId) : Promise.resolve(undefined),
     listReadings(),
     listOperations(),
     db.mlfs.where('batchId').equals(batchId).first(),
-    listTastings()
+    listTastings(),
+    listAllocations(),
+    listRackings(),
+    db.tanks.toArray()
   ])
   const readings = allReadings.filter((row) => row.batchId === batchId)
   const operations = allOperations.filter((row) => row.batchId === batchId)
   const tastings = allTastings.filter((row) => row.batchId === batchId)
+  const rackings = allRackings.filter((row) => row.batchId === batchId)
+  const batchAllocations = allAllocations
+    .filter((row) => row.batchId === batchId)
+    .map((row) => ({
+      id: row.id,
+      batchId: row.batchId,
+      tankId: row.tankId,
+      volumeL: row.volumeL,
+      tankCode: tanks.find((item) => item.id === row.tankId)?.code ?? null
+    }))
+  const totalInTankL = Math.round(batchAllocations.reduce((sum, row) => sum + row.volumeL, 0) * 10) / 10
 
   let declineSum = 0
   for (let i = 1; i < readings.length; i += 1) {
@@ -80,6 +122,9 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
     batch: stripRevision(batch),
     parcel: parcel ? stripRevision(parcel) : null,
     tank: tank ? stripRevision(tank) : null,
+    tankAllocations: batchAllocations,
+    totalInTankL,
+    rackings: rackings.map(stripRevision),
     readings: readings.map(stripRevision),
     operations: operations.map(stripRevision),
     mlf: mlf ? stripRevision(mlf) : null,

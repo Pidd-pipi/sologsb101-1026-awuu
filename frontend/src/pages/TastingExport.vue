@@ -347,6 +347,7 @@ watch(
             <el-descriptions-item label="地块/罐">{{ dbCounts.parcels ?? 0 }} / {{ dbCounts.tanks ?? 0 }}</el-descriptions-item>
             <el-descriptions-item label="批次/读数">{{ dbCounts.batches ?? 0 }} / {{ dbCounts.readings ?? 0 }}</el-descriptions-item>
             <el-descriptions-item label="作业/苹乳">{{ dbCounts.operations ?? 0 }} / {{ dbCounts.mlfs ?? 0 }}</el-descriptions-item>
+            <el-descriptions-item label="分罐/倒罐流水">{{ dbCounts.tankAllocations ?? 0 }} / {{ dbCounts.rackings ?? 0 }}</el-descriptions-item>
             <el-descriptions-item label="品评">{{ dbCounts.tastings ?? 0 }}</el-descriptions-item>
           </el-descriptions>
           <div class="btn-row">

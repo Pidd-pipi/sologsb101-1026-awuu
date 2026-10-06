@@ -6,7 +6,7 @@ import { ref } from 'vue'
 import type { LocationQuery } from 'vue-router'
 import type { Tank, TankState } from '@/types/tank'
 import type { FilterModel } from '@/types/filter'
-import type { BatchRow, TankRow } from '@/utils/db'
+import type { TankAllocationRow, TankRow } from '@/utils/db'
 import { assertTankAssignable, putTank, removeTank, updateTank as updateTankRow, ROW_REVISION } from '@/utils/db'
 import { createId } from '@/utils/uuid'
 import { queryToFilters } from '@/utils/query'
@@ -34,9 +34,14 @@ export const useTankStore = defineStore('tank', () => {
     selectedId.value = id
   }
 
-  /** 找出占用该罐的在罐批次（无则返回 null） */
-  function occupancyOf(tankId: string, batches: BatchRow[]): BatchRow | null {
-    return batches.find((batch) => batch.tankId === tankId && batch.state !== '已出罐') ?? null
+  /** 找出占用该罐的在罐批次（以分罐表为准；拆罐后同一罐可能有多个批次分酒） */
+  function occupancyOf(tankId: string, allocations: TankAllocationRow[]): TankAllocationRow[] {
+    return allocations.filter((item) => item.tankId === tankId)
+  }
+
+  /** 找出该罐中某个在罐批次的分罐行 */
+  function occupancyByBatch(tankId: string, batchId: string, allocations: TankAllocationRow[]): TankAllocationRow | null {
+    return allocations.find((item) => item.tankId === tankId && item.batchId === batchId) ?? null
   }
 
   /** 分配前校验：罐位空闲且未被其它在罐批次占用 */
@@ -83,6 +88,7 @@ export const useTankStore = defineStore('tank', () => {
     applyQuery,
     select,
     occupancyOf,
+    occupancyByBatch,
     ensureAssignable,
     createTank,
     updateTank,
